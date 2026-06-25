@@ -20,6 +20,7 @@ from app.services.agent_runner import AgentRunner, get_agent_or_default
 from app.services.ai_hub import AIModelError
 from app.services.knowledge_service import build_kb_context
 from app.services.requirement_service import get_merged_requirements_text, truncate_requirements
+from app.services.resource_validate import get_project_or_404
 
 router = APIRouter()
 
@@ -83,6 +84,7 @@ def _normalize_tree(tree, default_test_type: str | None = None) -> list[TestPoin
 
 @router.get("/tree/{project_id}")
 async def get_tree(project_id: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    await get_project_or_404(db, project_id)
     tree = await test_point_service.build_tree(db, project_id)
     return {"tree": tree}
 
@@ -93,6 +95,7 @@ async def save_tree(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission(EDIT_TEST_POINT)),
 ):
+    await get_project_or_404(db, data.project_id)
     await test_point_service.save_tree(db, data.project_id, data.tree, user.id, data.remark)
     feat = await sync_features_from_test_points(db, data.project_id)
     return {"message": "测试点树已保存", "features_sync": feat}
@@ -104,6 +107,7 @@ async def generate_test_points(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission(EDIT_TEST_POINT)),
 ):
+    await get_project_or_404(db, data.project_id)
     req_text = await get_merged_requirements_text(db, data.project_id, data.document_ids)
     if data.requirements_text:
         req_text = f"{req_text}\n\n{data.requirements_text}".strip()
@@ -162,9 +166,12 @@ async def generate_cases_from_points(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission(EDIT_TEST_POINT)),
 ):
+    await get_project_or_404(db, data.project_id)
     points = await test_point_service.get_leaf_points(db, data.project_id, data.test_point_ids)
-    if not points:
-        raise HTTPException(400, "未找到有效测试点")
+    found_ids = {p.id for p in points}
+    if len(found_ids) != len(data.test_point_ids):
+        missing = [str(pid) for pid in data.test_point_ids if pid not in found_ids]
+        raise HTTPException(400, f"测试点不存在: {', '.join(missing[:5])}")
 
     if not data.document_ids:
         req_text = await get_merged_requirements_text(db, data.project_id, None)

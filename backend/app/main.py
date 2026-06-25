@@ -1,10 +1,12 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import api_router
 from app.config import get_settings
+from app.core.exception_handlers import http_exception_handler, request_validation_handler
 from app.init_db import init_database
 
 settings = get_settings()
@@ -21,6 +23,9 @@ app = FastAPI(
     version=settings.app_version,
     lifespan=lifespan,
 )
+
+app.add_exception_handler(RequestValidationError, request_validation_handler)
+app.add_exception_handler(HTTPException, http_exception_handler)
 
 if settings.app_cors_allow_all:
     app.add_middleware(

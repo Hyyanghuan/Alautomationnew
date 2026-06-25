@@ -1,54 +1,23 @@
 import math
 from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.deps import get_current_user
-from app.core.permissions import require_permission, EDIT_CASE
+from app.core.permissions import EDIT_CASE, require_permission
 from app.database import get_db
 from app.executors.executor_rules import get_executor_rule
 from app.executors.registry import list_executors
 from app.executors.types import PLAN_EXECUTOR_OPTIONS, normalize_executor_type
-from app.models.test_plan import TestPlan, TestPlanCase
+from app.models.test_plan import ExecutionStrategy, PlanStatus, TestPlan, TestPlanCase
 from app.models.user import User
-from app.schemas.common import PageResult, MessageResponse
-from pydantic import BaseModel, Field
-from typing import Optional
-from app.models.test_plan import PlanStatus, ExecutionStrategy
+from app.schemas.common import MessageResponse, PageResult
+from app.schemas.test_plan import PlanCreate, PlanOut, PlanUpdate
+from app.services.resource_validate import ensure_plan_case_same_project, get_project_or_404
 
 router = APIRouter()
-
-
-class PlanCreate(BaseModel):
-    project_id: UUID
-    name: str
-    description: Optional[str] = None
-    version_id: Optional[UUID] = None
-    strategy: ExecutionStrategy = ExecutionStrategy.PARALLEL
-    executor_type: str = Field("api", description="api|unit|e2e|performance|agent")
-
-
-class PlanUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    strategy: Optional[ExecutionStrategy] = None
-    executor_type: Optional[str] = None
-    status: Optional[PlanStatus] = None
-
-
-class PlanOut(BaseModel):
-    id: UUID
-    project_id: UUID
-    name: str
-    description: Optional[str]
-    status: PlanStatus
-    strategy: ExecutionStrategy
-    executor_type: str
-    executor_name: Optional[str] = None
-    executor_tech: Optional[str] = None
-    case_count: int = 0
-
-    model_config = {"from_attributes": True}
 
 
 def _plan_out(p: TestPlan, case_count: int = 0) -> PlanOut:
@@ -94,6 +63,7 @@ async def list_plans(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
+    await get_project_or_404(db, project_id)
     q = select(TestPlan).where(TestPlan.project_id == project_id)
     if keyword:
         q = q.where(TestPlan.name.ilike(f"%{keyword}%"))
@@ -110,13 +80,13 @@ async def list_plans(
 
 
 @router.post("", response_model=PlanOut)
-async def create_plan(data: PlanCreate, db: AsyncSession = Depends(get_db), user: User = Depends(require_permission(EDIT_CASE))):
-    executor_type = normalize_executor_type(data.executor_type, "api")
-    if not get_executor_rule(executor_type):
-        raise HTTPException(400, f"不支持的执行器类型: {data.executor_type}")
-    payload = data.model_dump()
-    payload["executor_type"] = executor_type
-    p = TestPlan(**payload, created_by=user.id)
+async def create_plan(
+    data: PlanCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission(EDIT_CASE)),
+):
+    await get_project_or_404(db, data.project_id)
+    p = TestPlan(**data.model_dump(), created_by=user.id)
     db.add(p)
     await db.flush()
     return _plan_out(p, 0)
@@ -132,12 +102,7 @@ async def update_plan(
     p = await db.get(TestPlan, plan_id)
     if not p:
         raise HTTPException(404, "计划不存在")
-    updates = data.model_dump(exclude_unset=True)
-    if "executor_type" in updates:
-        updates["executor_type"] = normalize_executor_type(updates["executor_type"], "api")
-        if not get_executor_rule(updates["executor_type"]):
-            raise HTTPException(400, "不支持的执行器类型")
-    for k, v in updates.items():
+    for k, v in data.model_dump(exclude_unset=True).items():
         setattr(p, k, v)
     await db.flush()
     cnt = (await db.execute(
@@ -153,14 +118,7 @@ async def add_case_to_plan(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_permission(EDIT_CASE)),
 ):
-    plan = await db.get(TestPlan, plan_id)
-    if not plan:
-        raise HTTPException(404, "计划不存在")
-    case = await db.get(TestCase, case_id)
-    if not case:
-        raise HTTPException(404, "用例不存在")
-    if case.project_id != plan.project_id:
-        raise HTTPException(400, "用例与计划不属于同一项目")
+    await ensure_plan_case_same_project(db, plan_id, case_id)
     exists = await db.execute(
         select(TestPlanCase).where(TestPlanCase.plan_id == plan_id, TestPlanCase.case_id == case_id)
     )

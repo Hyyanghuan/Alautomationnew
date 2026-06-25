@@ -7,18 +7,27 @@ from sqlalchemy.orm import selectinload
 from app.core.deps import get_current_user
 from app.core.permissions import require_permission, EDIT_CASE
 from app.database import get_db
+from app.models.agent import AgentType
 from app.models.test_case import CaseStatus, TestCase, TestCaseType, test_case_type_link
-from app.models.test_plan import TestPlan, TestPlanCase
+from app.models.test_plan import TestPlanCase
 from app.models.user import User
-from app.schemas.common import PageResult, MessageResponse
+from app.schemas.common import MessageResponse, PageResult
 from app.schemas.test_case import (
-    BatchLinkPlanRequest, BatchLinkTypeRequest,
-    TestCaseCreate, TestCaseOut, TestCaseTypeOut, TestCaseUpdate,
+    BatchLinkPlanRequest,
+    BatchLinkTypeRequest,
+    TestCaseCreate,
+    TestCaseOut,
+    TestCaseTypeOut,
+    TestCaseUpdate,
 )
 from app.schemas.test_point import VerifyCasesRequest
-from app.models.agent import AgentType
 from app.services.agent_runner import AgentRunner, get_agent_or_default
 from app.services.ai_hub import AIModelError
+from app.services.resource_validate import (
+    get_plan_or_404,
+    get_project_or_404,
+    resolve_test_case_types,
+)
 
 router = APIRouter()
 
@@ -48,6 +57,7 @@ async def list_cases(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
+    await get_project_or_404(db, project_id)
     q = select(TestCase).where(TestCase.project_id == project_id).options(selectinload(TestCase.types))
     if keyword:
         q = q.where(TestCase.name.ilike(f"%{keyword}%"))
@@ -69,10 +79,10 @@ async def create_case(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission(EDIT_CASE)),
 ):
+    await get_project_or_404(db, data.project_id)
     tc = TestCase(**data.model_dump(exclude={"type_ids"}), created_by=user.id)
     if data.type_ids:
-        types = (await db.execute(select(TestCaseType).where(TestCaseType.id.in_(data.type_ids)))).scalars().all()
-        tc.types = list(types)
+        tc.types = await resolve_test_case_types(db, data.type_ids)
     db.add(tc)
     await db.flush()
     await db.refresh(tc, ["types"])
@@ -91,16 +101,13 @@ async def update_case(
     for k, v in data.model_dump(exclude_unset=True, exclude={"type_ids"}).items():
         setattr(tc, k, v)
     if data.type_ids is not None:
-        types = (await db.execute(select(TestCaseType).where(TestCaseType.id.in_(data.type_ids)))).scalars().all()
-        tc.types = list(types)
+        tc.types = await resolve_test_case_types(db, data.type_ids)
     return _case_out(tc)
 
 
 @router.post("/batch-link-plan", response_model=MessageResponse)
 async def batch_link_plan(data: BatchLinkPlanRequest, db: AsyncSession = Depends(get_db), _: User = Depends(require_permission(EDIT_CASE))):
-    plan = await db.get(TestPlan, data.plan_id)
-    if not plan:
-        raise HTTPException(404, "计划不存在")
+    plan = await get_plan_or_404(db, data.plan_id)
     exists = await db.execute(
         select(TestPlanCase.case_id).where(
             TestPlanCase.plan_id == data.plan_id,
@@ -120,7 +127,7 @@ async def batch_link_plan(data: BatchLinkPlanRequest, db: AsyncSession = Depends
             continue
         case = await db.get(TestCase, cid)
         if not case:
-            continue
+            raise HTTPException(400, f"用例不存在: {cid}")
         if case.project_id != plan.project_id:
             raise HTTPException(400, f"用例 {case.name} 与计划不属于同一项目")
         db.add(TestPlanCase(plan_id=data.plan_id, case_id=cid, sort_order=base_order + added))
@@ -134,13 +141,14 @@ async def batch_link_plan(data: BatchLinkPlanRequest, db: AsyncSession = Depends
 
 @router.post("/batch-link-type", response_model=MessageResponse)
 async def batch_link_type(data: BatchLinkTypeRequest, db: AsyncSession = Depends(get_db), _: User = Depends(require_permission(EDIT_CASE))):
+    types = await resolve_test_case_types(db, data.type_ids, required=True)
     for cid in data.case_ids:
         tc = await db.get(TestCase, cid, options=[selectinload(TestCase.types)])
-        if tc:
-            types = (await db.execute(select(TestCaseType).where(TestCaseType.id.in_(data.type_ids)))).scalars().all()
-            for t in types:
-                if t not in tc.types:
-                    tc.types.append(t)
+        if not tc:
+            raise HTTPException(400, f"用例不存在: {cid}")
+        for t in types:
+            if t not in tc.types:
+                tc.types.append(t)
     return MessageResponse(message="批量关联类型完成")
 
 
@@ -151,6 +159,7 @@ async def verify_cases(
     _: User = Depends(require_permission(EDIT_CASE)),
 ):
     """使用 Agent 智能体核查用例质量"""
+    await get_project_or_404(db, data.project_id)
     result = await db.execute(
         select(TestCase).where(
             TestCase.project_id == data.project_id,
@@ -158,8 +167,10 @@ async def verify_cases(
         )
     )
     cases = result.scalars().all()
-    if not cases:
-        raise HTTPException(400, "未找到用例")
+    found_ids = {c.id for c in cases}
+    if len(found_ids) != len(data.case_ids):
+        missing = [str(cid) for cid in data.case_ids if cid not in found_ids]
+        raise HTTPException(400, f"用例不存在或不属于该项目: {', '.join(missing[:5])}")
     payload = [
         {
             "name": c.name,

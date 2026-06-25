@@ -5,8 +5,6 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel
-
 from app.core.deps import get_current_user
 from app.core.permissions import require_permission, EXECUTE_PLAN, VIEW_REPORT
 from app.database import get_db
@@ -18,13 +16,10 @@ from app.models.project import Project
 from app.models.test_plan import ExecutionStatus, TestExecution, TestExecutionResult, TestPlan, TestPlanCase
 from app.models.user import User
 from app.schemas.common import PageResult
+from app.schemas.execution import RunPlanRequest
 from app.services.execution_service import run_plan
 
 router = APIRouter()
-
-
-class RunPlanRequest(BaseModel):
-    environment: Optional[dict] = None
 
 
 @router.get("/executors")
