@@ -24,7 +24,7 @@
       <el-table-column label="操作" width="280" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" @click="openEntries(row)">管理条目</el-button>
-          <el-upload :show-file-list="false" :http-request="(opt) => onUpload(row.id, opt)" style="display:inline">
+          <el-upload :show-file-list="false" :http-request="(opt: UploadRequestOptions) => onUpload(row.id, opt)" style="display:inline">
             <el-button link>上传</el-button>
           </el-upload>
           <el-button link @click="openKbDialog(row)">编辑</el-button>

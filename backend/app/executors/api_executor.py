@@ -46,7 +46,10 @@ class APIExecutor(BaseExecutor):
         json_path = step.get("expected_json_path")
         json_value = step.get("expected_json_value")
         if json_path and json_value is not None:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except Exception:
+                return False, f"{line}\n响应非 JSON，无法断言路径 {json_path}"
             parts = json_path.split(".")
             cur: Any = data
             for p in parts:

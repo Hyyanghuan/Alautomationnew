@@ -128,17 +128,26 @@ class E2EExecutor(BaseExecutor):
                 )
                 page = await context.new_page()
 
-                if script:
-                    # script_content 作为 Python Playwright 脚本（高级用法，演示执行 goto）
+                if steps:
+                    for step in steps:
+                        await self._run_step(page, step, base_url, log_lines)
+                elif script:
                     log_lines.append("执行 script_content（简化模式：仅支持 page.goto 单行）")
+                    matched = False
                     if "page.goto" in script:
                         m = re.search(r'page\.goto\(["\']([^"\']+)["\']\)', script)
                         if m:
                             await page.goto(m.group(1))
                             log_lines.append(f"goto {m.group(1)}")
-                elif steps:
-                    for step in steps:
-                        await self._run_step(page, step, base_url, log_lines)
+                            matched = True
+                    if not matched:
+                        await context.close()
+                        await browser.close()
+                        return ExecutorResult(
+                            status=ExecutorResultStatus.FAILED,
+                            log="script_content 未包含可执行的 page.goto(...)",
+                            duration_ms=int((time.time() - start) * 1000),
+                        )
                 else:
                     await page.goto(base_url)
                     log_lines.append(f"goto {base_url}")

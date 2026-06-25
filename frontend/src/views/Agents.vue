@@ -142,6 +142,12 @@ const SECTIONS = [
   { key: 'configs', label: 'configs/ 配置', files: ['model-settings.yaml', 'tool-permissions.yaml', 'env.example', 'agent-profile.json'] },
 ]
 
+type FileTreeLeaf = { id: string; label: string; section: string; file: string }
+type FileTreeBranch = { id: string; label: string; children: FileTreeLeaf[] }
+type FileTreeNode = FileTreeBranch | FileTreeLeaf
+
+const isFileTreeBranch = (node: FileTreeNode): node is FileTreeBranch => 'children' in node
+
 const items = ref<any[]>([])
 const modelOptions = ref<any[]>([])
 const loading = ref(false)
@@ -153,8 +159,8 @@ const profileId = ref('')
 const profileName = ref('')
 const formEnabled = ref(true)
 const agentFiles = ref<Record<string, any>>({})
-const fileTree = ref<any[]>([])
-const currentFile = ref<any>(null)
+const fileTree = ref<FileTreeNode[]>([])
+const currentFile = ref<FileTreeLeaf | null>(null)
 const currentContent = ref('')
 const profilePrompt = ref('')
 const savingProfile = ref(false)
@@ -177,8 +183,8 @@ const goLinked = (row: any) => {
   if (route) router.push(route)
 }
 
-const buildTree = (files: Record<string, any>) => {
-  const tree = SECTIONS.map((s) => ({
+const buildTree = (_files: Record<string, any>) => {
+  const tree: FileTreeNode[] = SECTIONS.map((s) => ({
     id: s.key,
     label: s.label,
     children: s.files.map((f) => ({ id: `${s.key}/${f}`, label: f, section: s.key, file: f })),
@@ -186,12 +192,13 @@ const buildTree = (files: Record<string, any>) => {
   tree.push({ id: 'README.md', label: 'README.md', section: '_root', file: 'README.md' })
   tree.push({ id: 'agent-index.md', label: 'agent-index.md', section: '_root', file: 'agent-index.md' })
   fileTree.value = tree
-  if (!currentFile.value && tree[0]?.children?.[0]) {
-    onFileSelect(tree[0].children[0])
+  const firstBranch = tree.find(isFileTreeBranch)
+  if (!currentFile.value && firstBranch?.children[0]) {
+    onFileSelect(firstBranch.children[0])
   }
 }
 
-const onFileSelect = (node: any) => {
+const onFileSelect = (node: FileTreeLeaf) => {
   if (!node.section) return
   currentFile.value = node
   if (node.section === '_root') {

@@ -303,3 +303,16 @@ async def get_agent_or_default(
         label = type_labels.get(agent_type, agent_type.value)
         raise ValueError(f"未找到可用的{label} Agent，请先在 Agent 管理中创建并绑定模型")
     return agent2.id
+
+
+async def try_get_agent_or_default(
+    db: AsyncSession,
+    agent_id: Optional[UUID],
+    agent_type: AgentType,
+    project_id: Optional[UUID] = None,
+) -> Optional[UUID]:
+    """与 get_agent_or_default 相同，但无可用 Agent 时返回 None 而非抛错"""
+    try:
+        return await get_agent_or_default(db, agent_id, agent_type, project_id)
+    except ValueError:
+        return None

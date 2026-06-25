@@ -104,10 +104,29 @@ class FeatureOut(BaseModel):
 class FeatureTestPointNode(BaseModel):
     id: Optional[str] = None
     name: str
+    test_type: Optional[str] = None
+    locator: Optional[dict] = None
     children: List["FeatureTestPointNode"] = []
 
 
 FeatureTestPointNode.model_rebuild()
+
+
+class FeatureCaseSummary(BaseModel):
+    id: str
+    name: str
+    priority: str
+    status: str
+    type_names: List[str] = []
+    type_ids: List[str] = []
+    test_point_id: Optional[str] = None
+    precondition: Optional[str] = None
+    steps: Optional[list | dict | str] = None
+    expected_result: Optional[str] = None
+    tags: List[str] = []
+    script_content: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
 
 class FeatureDetailOut(BaseModel):
@@ -120,4 +139,5 @@ class FeatureDetailOut(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     test_points: List[FeatureTestPointNode] = []
+    test_cases: List[FeatureCaseSummary] = []
     root_point_id: Optional[str] = None

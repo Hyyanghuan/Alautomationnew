@@ -153,7 +153,12 @@
                 <el-input v-model="caseEditForm.precondition" type="textarea" :rows="3" />
               </el-form-item>
               <el-form-item label="测试步骤">
-                <el-input v-model="caseEditForm.stepsText" type="textarea" :rows="5" placeholder="每行一个步骤" />
+                <el-input
+                  v-model="caseEditForm.stepsText"
+                  type="textarea"
+                  :rows="8"
+                  placeholder="JSON 步骤数组，或每行一个文本步骤"
+                />
               </el-form-item>
               <el-form-item label="预期结果">
                 <el-input v-model="caseEditForm.expected_result" type="textarea" :rows="4" />
@@ -292,8 +297,25 @@ const formatSteps = (steps: unknown): string[] => {
   return [String(steps)]
 }
 
-const stepsToText = (steps: unknown) => formatSteps(steps).join('\n')
-const textToSteps = (text: string) => text.split('\n').map((s) => s.trim()).filter(Boolean)
+const stepsToText = (steps: unknown) => {
+  if (!steps) return ''
+  if (Array.isArray(steps) && steps.some((s) => s && typeof s === 'object')) {
+    return JSON.stringify(steps, null, 2)
+  }
+  return formatSteps(steps).join('\n')
+}
+
+const textToSteps = (text: string) => {
+  const trimmed = text.trim()
+  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+    try {
+      return JSON.parse(trimmed)
+    } catch {
+      /* 回退为逐行文本 */
+    }
+  }
+  return trimmed.split('\n').map((s) => s.trim()).filter(Boolean)
+}
 
 const loadCaseTypes = async () => {
   try {
@@ -433,12 +455,12 @@ const fetchCaseDetail = async (id: string) => {
   return data
 }
 
-const fillCaseEditForm = (c: CaseSummary) => {
+const fillCaseEditForm = (c: CaseSummary & { type_ids?: (string | { toString(): string })[] }) => {
   caseEditForm.value = {
     name: c.name || '',
     priority: c.priority || 'P2',
     status: c.status || 'enabled',
-    type_ids: c.type_ids || [],
+    type_ids: (c.type_ids || []).map((id) => String(id)),
     precondition: c.precondition || '',
     stepsText: stepsToText(c.steps),
     expected_result: c.expected_result || '',

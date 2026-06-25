@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.project import ProjectFeature
 from app.models.test_case import TestCase
@@ -37,8 +38,11 @@ async def sync_features_from_test_points(db: AsyncSession, project_id: uuid.UUID
     removed = 0
     for f in existing_list:
         if f.feature_name not in name_set:
-            await db.delete(f)
-            removed += 1
+            desc = f.description or ""
+            # 仅删除由测试点自动同步的功能，保留手动创建的功能
+            if "自动同步" in desc or desc.startswith("由测试点"):
+                await db.delete(f)
+                removed += 1
     await db.flush()
 
     if not names:
@@ -115,6 +119,7 @@ def _case_summary(case: TestCase) -> dict:
         "priority": priority,
         "status": status,
         "type_names": [t.name for t in (case.types or [])],
+        "type_ids": [str(t.id) for t in (case.types or [])],
         "test_point_id": str(case.test_point_id) if case.test_point_id else None,
         "precondition": case.precondition,
         "steps": case.steps,
@@ -132,7 +137,10 @@ async def get_features_with_test_points(db: AsyncSession, project_id: uuid.UUID)
     point_feature_map = _build_point_feature_map(tree)
 
     cases_result = await db.execute(
-        select(TestCase).where(TestCase.project_id == project_id).order_by(TestCase.updated_at.desc())
+        select(TestCase)
+        .where(TestCase.project_id == project_id)
+        .options(selectinload(TestCase.types))
+        .order_by(TestCase.updated_at.desc())
     )
     cases_by_feature: dict[str, list[dict]] = {}
     for case in cases_result.scalars().all():
@@ -155,8 +163,8 @@ async def get_features_with_test_points(db: AsyncSession, project_id: uuid.UUID)
         seen.add(name)
         f = by_name.get(name)
         items.append({
-            "id": str(f.id) if f else None,
-            "project_id": str(project_id),
+            "id": f.id if f else None,
+            "project_id": project_id,
             "feature_name": name,
             "description": f.description if f else f"由测试点「{name}」自动同步",
             "introduced_version": f.introduced_version if f else None,
@@ -170,8 +178,8 @@ async def get_features_with_test_points(db: AsyncSession, project_id: uuid.UUID)
     for f in by_name.values():
         if f.feature_name not in seen:
             items.append({
-                "id": str(f.id),
-                "project_id": str(f.project_id),
+                "id": f.id,
+                "project_id": f.project_id,
                 "feature_name": f.feature_name,
                 "description": f.description,
                 "introduced_version": f.introduced_version,
@@ -186,7 +194,7 @@ async def get_features_with_test_points(db: AsyncSession, project_id: uuid.UUID)
     if unlinked:
         items.append({
             "id": None,
-            "project_id": str(project_id),
+            "project_id": project_id,
             "feature_name": "未关联功能",
             "description": "未绑定测试点的用例",
             "introduced_version": None,

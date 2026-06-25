@@ -1,4 +1,4 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory, type RouteLocationGeneric } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 
 const routes = [
@@ -32,7 +32,7 @@ const routes = [
       { path: 'projects/:projectId/test-plans', redirect: '/test-plans' },
       { path: 'projects/:projectId/executions', redirect: '/executions' },
       { path: 'projects/:projectId/reports', redirect: '/reports' },
-      { path: 'projects/:projectId/reports/:executionId', redirect: (to) => `/reports/${to.params.executionId}` },
+      { path: 'projects/:projectId/reports/:executionId', redirect: (to: RouteLocationGeneric) => `/reports/${String(to.params.executionId ?? '')}` },
       { path: 'test-points/:projectId', redirect: '/test-points' },
       { path: 'test-cases/:projectId', redirect: '/test-cases' },
       { path: 'test-plans/:projectId', redirect: '/test-plans' },

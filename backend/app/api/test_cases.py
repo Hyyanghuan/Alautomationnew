@@ -8,7 +8,7 @@ from app.core.deps import get_current_user
 from app.core.permissions import require_permission, EDIT_CASE
 from app.database import get_db
 from app.models.test_case import CaseStatus, TestCase, TestCaseType, test_case_type_link
-from app.models.test_plan import TestPlanCase
+from app.models.test_plan import TestPlan, TestPlanCase
 from app.models.user import User
 from app.schemas.common import PageResult, MessageResponse
 from app.schemas.test_case import (
@@ -56,7 +56,9 @@ async def list_cases(
     if status:
         q = q.where(TestCase.status == status)
     total = len((await db.execute(q)).scalars().all())
-    result = await db.execute(q.offset((page-1)*page_size).limit(page_size).order_by(TestCase.created_at.desc()))
+    result = await db.execute(
+        q.order_by(TestCase.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+    )
     items = [_case_out(c) for c in result.scalars().all()]
     return PageResult(items=items, total=total, page=page, page_size=page_size, pages=max(1, math.ceil(total/page_size)))
 
@@ -96,6 +98,9 @@ async def update_case(
 
 @router.post("/batch-link-plan", response_model=MessageResponse)
 async def batch_link_plan(data: BatchLinkPlanRequest, db: AsyncSession = Depends(get_db), _: User = Depends(require_permission(EDIT_CASE))):
+    plan = await db.get(TestPlan, data.plan_id)
+    if not plan:
+        raise HTTPException(404, "计划不存在")
     exists = await db.execute(
         select(TestPlanCase.case_id).where(
             TestPlanCase.plan_id == data.plan_id,
@@ -103,11 +108,22 @@ async def batch_link_plan(data: BatchLinkPlanRequest, db: AsyncSession = Depends
         )
     )
     linked = set(exists.scalars().all())
+    max_order = (
+        await db.execute(
+            select(func.max(TestPlanCase.sort_order)).where(TestPlanCase.plan_id == data.plan_id)
+        )
+    ).scalar()
+    base_order = (max_order if max_order is not None else -1) + 1
     added = 0
     for i, cid in enumerate(data.case_ids):
         if cid in linked:
             continue
-        db.add(TestPlanCase(plan_id=data.plan_id, case_id=cid, sort_order=i))
+        case = await db.get(TestCase, cid)
+        if not case:
+            continue
+        if case.project_id != plan.project_id:
+            raise HTTPException(400, f"用例 {case.name} 与计划不属于同一项目")
+        db.add(TestPlanCase(plan_id=data.plan_id, case_id=cid, sort_order=base_order + added))
         added += 1
     skipped = len(data.case_ids) - added
     msg = f"已关联 {added} 条用例到计划"

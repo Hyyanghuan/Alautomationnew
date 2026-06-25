@@ -23,6 +23,26 @@ from app.services.requirement_service import get_merged_requirements_text, trunc
 
 router = APIRouter()
 
+# 测试点 meta.test_type -> 用例类型名称（test_case_types.name）
+_POINT_TYPE_TO_CASE_TYPE: dict[str, str] = {
+    "功能": "功能",
+    "接口": "接口",
+    "Web页面": "UI",
+    "Agent测试": "Agent测试",
+    "性能": "性能",
+}
+
+
+async def _case_type_for_point(db: AsyncSession, pt) -> TestCaseType | None:
+    meta = pt.meta or {}
+    type_name = _POINT_TYPE_TO_CASE_TYPE.get(meta.get("test_type") or "功能", "功能")
+    result = await db.execute(select(TestCaseType).where(TestCaseType.name == type_name))
+    case_type = result.scalar_one_or_none()
+    if case_type:
+        return case_type
+    fallback = await db.execute(select(TestCaseType).where(TestCaseType.name == "功能"))
+    return fallback.scalar_one_or_none()
+
 
 def _normalize_tree(tree, default_test_type: str | None = None) -> list[TestPointNode]:
     from app.schemas.test_point import ElementLocator
@@ -160,8 +180,7 @@ async def generate_cases_from_points(
         raise HTTPException(400, str(e))
 
     created = []
-    type_result = await db.execute(select(TestCaseType).where(TestCaseType.name == "功能"))
-    default_type = type_result.scalar_one_or_none()
+    type_cache: dict[UUID, TestCaseType | None] = {}
 
     sem = asyncio.Semaphore(3)
 
@@ -173,6 +192,9 @@ async def generate_cases_from_points(
     try:
         results = await asyncio.gather(*[generate_for_point(pt) for pt in points])
         for pt, cases_data in results:
+            if pt.id not in type_cache:
+                type_cache[pt.id] = await _case_type_for_point(db, pt)
+            case_type = type_cache[pt.id]
             for cd in cases_data:
                 tc = TestCase(
                     project_id=data.project_id,
@@ -187,8 +209,8 @@ async def generate_cases_from_points(
                     else CasePriority.P2,
                     created_by=user.id,
                 )
-                if default_type:
-                    tc.types.append(default_type)
+                if case_type:
+                    tc.types.append(case_type)
                 db.add(tc)
                 created.append(tc.name)
     except AIModelError as e:

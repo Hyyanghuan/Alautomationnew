@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
+from app.executors.base import ExecutorResultStatus
 from app.executors.executor_rules import get_executor_rule
 from app.executors.registry import get_executor
 from app.executors.types import normalize_executor_type
@@ -22,7 +23,7 @@ from app.models.test_plan import (
 )
 from app.models.user import User
 from app.models.agent import AgentType
-from app.services.agent_runner import AgentRunner, get_agent_or_default
+from app.services.agent_runner import AgentRunner, try_get_agent_or_default
 from app.services.telegram_service import try_auto_send_report
 
 settings = get_settings()
@@ -43,6 +44,17 @@ async def append_log(
             message=message,
         )
     )
+
+
+def _map_result_status(result_status: str) -> tuple[ExecutionStatus, LogLevel, bool]:
+    """返回 (执行状态, 日志级别, 是否计入 failed)"""
+    if result_status == ExecutorResultStatus.PASSED.value:
+        return ExecutionStatus.PASSED, LogLevel.INFO, False
+    if result_status == ExecutorResultStatus.SKIPPED.value:
+        return ExecutionStatus.SKIPPED, LogLevel.WARN, False
+    if result_status == ExecutorResultStatus.ERROR.value:
+        return ExecutionStatus.ERROR, LogLevel.ERROR, True
+    return ExecutionStatus.FAILED, LogLevel.ERROR, True
 
 
 async def run_plan(
@@ -74,7 +86,11 @@ async def run_plan(
         env.setdefault("screenshot", True)
     executor_display = user.full_name or user.username if user else "系统"
 
-    cases_result = await db.execute(select(TestPlanCase).where(TestPlanCase.plan_id == plan_id))
+    cases_result = await db.execute(
+        select(TestPlanCase)
+        .where(TestPlanCase.plan_id == plan_id)
+        .order_by(TestPlanCase.sort_order)
+    )
     plan_cases = cases_result.scalars().all()
     case_ids = [pc.case_id for pc in plan_cases]
     if not case_ids:
@@ -85,6 +101,7 @@ async def run_plan(
     )
     cases = {c.id: c for c in cases_result.scalars().all()}
 
+    plan.status = PlanStatus.RUNNING
     started = datetime.utcnow()
     execution = TestExecution(
         plan_id=plan_id,
@@ -111,9 +128,8 @@ async def run_plan(
     await append_log(db, execution.id, f"[执行人] {executor_display}")
 
     passed = failed = skipped = 0
-    healing_agent_id = await get_agent_or_default(db, None, AgentType.HEALING, plan.project_id)
-    healing_runner = AgentRunner(db, healing_agent_id)
-    await healing_runner.load()
+    healing_runner: Optional[AgentRunner] = None
+    healing_unavailable_logged = False
 
     for idx, case_id in enumerate(case_ids, 1):
         case = cases.get(case_id)
@@ -122,13 +138,22 @@ async def run_plan(
             await append_log(db, execution.id, f"[跳过] 用例 {case_id} 不存在", LogLevel.WARN)
             continue
 
-        case_type = case.types[0].name if case.types else plan_executor
+        case_type_name = case.types[0].name if case.types else plan_executor
+        case_executor = normalize_executor_type(case_type_name, plan_executor)
         test_type = plan_executor
+        if case_executor != plan_executor:
+            await append_log(
+                db,
+                execution.id,
+                f"[警告] 用例「{case.name}」类型({case_type_name})与计划执行器({plan_executor})不一致，按计划执行器运行",
+                LogLevel.WARN,
+            )
+
         case_started = datetime.utcnow()
         await append_log(
             db,
             execution.id,
-            f"[{idx}/{len(case_ids)}] 开始执行: {case.name} (计划执行器={test_type}, 用例类型={case_type})",
+            f"[{idx}/{len(case_ids)}] 开始执行: {case.name} (计划执行器={test_type}, 用例类型={case_type_name})",
         )
 
         executor = get_executor(test_type)
@@ -140,30 +165,47 @@ async def run_plan(
         result = await executor.execute(case_data, env)
         healed = False
 
-        if result.status.value == "failed" and case.script_content:
-            await append_log(db, execution.id, f"[自愈] 用例 {case.name} 失败，触发自愈 Agent", LogLevel.WARN)
-            heal = await healing_runner.heal_script(result.log, case.script_content)
-            if heal.get("fixed_script"):
-                case.script_content = heal["fixed_script"]
-                healed = True
-                result = await executor.execute(
-                    {**case_data, "script_content": heal["fixed_script"]},
-                    env,
+        if result.status == ExecutorResultStatus.FAILED and case.script_content:
+            if healing_runner is None:
+                healing_id = await try_get_agent_or_default(
+                    db, None, AgentType.HEALING, plan.project_id
                 )
-                await append_log(db, execution.id, f"[自愈] 已重试执行 {case.name}")
+                if healing_id:
+                    healing_runner = AgentRunner(db, healing_id)
+                    await healing_runner.load()
+                else:
+                    if not healing_unavailable_logged:
+                        await append_log(
+                            db,
+                            execution.id,
+                            "[自愈] 未配置 Healing Agent，失败用例将跳过自愈",
+                            LogLevel.WARN,
+                        )
+                        healing_unavailable_logged = True
+            if healing_runner:
+                await append_log(
+                    db, execution.id, f"[自愈] 用例 {case.name} 失败，触发自愈 Agent", LogLevel.WARN
+                )
+                heal = await healing_runner.heal_script(result.log, case.script_content)
+                if heal.get("fixed_script"):
+                    case.script_content = heal["fixed_script"]
+                    await db.flush()
+                    healed = True
+                    result = await executor.execute(
+                        {**case_data, "script_content": heal["fixed_script"]},
+                        env,
+                    )
+                    await append_log(db, execution.id, f"[自愈] 已重试执行 {case.name}，脚本已保存")
 
-        if result.status.value == "passed":
-            status = ExecutionStatus.PASSED
+        status, log_level, counts_failed = _map_result_status(result.status.value)
+        if status == ExecutionStatus.PASSED:
             passed += 1
-            log_level = LogLevel.INFO
-        elif result.status.value == "skipped":
-            status = ExecutionStatus.SKIPPED
+        elif status == ExecutionStatus.SKIPPED:
             skipped += 1
-            log_level = LogLevel.WARN
-        else:
-            status = ExecutionStatus.FAILED
+        elif counts_failed:
             failed += 1
-            log_level = LogLevel.ERROR
+        else:
+            skipped += 1
 
         case_finished = datetime.utcnow()
         er = TestExecutionResult(
@@ -174,7 +216,7 @@ async def run_plan(
             executor_type=test_type,
             duration_ms=result.duration_ms,
             log=result.log,
-            error_message=result.log if status == ExecutionStatus.FAILED else None,
+            error_message=result.log if status in (ExecutionStatus.FAILED, ExecutionStatus.ERROR) else None,
             screenshot_url=result.screenshot_url,
             healed=healed,
             started_at=case_started,
@@ -208,7 +250,7 @@ async def run_plan(
     execution.summary = (
         f"通过 {passed}/{execution.total_cases}，失败 {failed}，跳过 {skipped}，耗时 {duration_ms}ms"
     )
-    plan.status = PlanStatus.COMPLETED
+    plan.status = PlanStatus.COMPLETED if failed == 0 else PlanStatus.READY
 
     await append_log(
         db,

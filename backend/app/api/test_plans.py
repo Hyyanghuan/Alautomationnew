@@ -147,11 +147,29 @@ async def update_plan(
 
 
 @router.post("/{plan_id}/cases/{case_id}")
-async def add_case_to_plan(plan_id: UUID, case_id: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(require_permission(EDIT_CASE))):
+async def add_case_to_plan(
+    plan_id: UUID,
+    case_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission(EDIT_CASE)),
+):
+    plan = await db.get(TestPlan, plan_id)
+    if not plan:
+        raise HTTPException(404, "计划不存在")
+    case = await db.get(TestCase, case_id)
+    if not case:
+        raise HTTPException(404, "用例不存在")
+    if case.project_id != plan.project_id:
+        raise HTTPException(400, "用例与计划不属于同一项目")
     exists = await db.execute(
         select(TestPlanCase).where(TestPlanCase.plan_id == plan_id, TestPlanCase.case_id == case_id)
     )
     if exists.scalar_one_or_none():
         return MessageResponse(message="用例已在计划中")
-    db.add(TestPlanCase(plan_id=plan_id, case_id=case_id))
+    cnt = (
+        await db.execute(
+            select(func.count()).select_from(TestPlanCase).where(TestPlanCase.plan_id == plan_id)
+        )
+    ).scalar() or 0
+    db.add(TestPlanCase(plan_id=plan_id, case_id=case_id, sort_order=cnt))
     return MessageResponse(message="用例已加入计划")
