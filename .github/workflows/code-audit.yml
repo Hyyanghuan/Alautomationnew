@@ -30,7 +30,7 @@ jobs:
         with:
           working-directory: ${{ github.event.inputs.working-directory || '.' }}
           fail-on-findings: 'true'
-
+          enable-telegram: 'true'    # 可省略，默认已是 true
           # 扫描模块开关
           enable-gitleaks: 'true'
           enable-super-linter: 'true'
@@ -39,8 +39,3 @@ jobs:
           enable-custom-rules: 'true'
           enable-test-cases: 'true'
 
-          # Telegram 通知（需配置 Secrets: TG_BOT_TOKEN, TG_CHAT_ID）
-          enable-telegram: ${{ secrets.TG_BOT_TOKEN != '' }}
-          telegram-bot-token: ${{ secrets.TG_BOT_TOKEN }}
-          telegram-chat-id: ${{ secrets.TG_CHAT_ID }}
-          telegram-bot-username: '@test_skills_yh_bot'
